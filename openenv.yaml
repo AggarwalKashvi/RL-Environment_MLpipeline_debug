@@ -1,0 +1,67 @@
+name: MLPipelineDebugEnv
+version: "1.0.0"
+description: >
+  A real-world simulation environment where an AI agent diagnoses and fixes
+  bugs across stages of a broken ML pipeline (preprocessing, model config,
+  training loop). Supports 3 tasks of increasing difficulty.
+
+entry_points:
+  reset: api.app:main
+  environment_class: env.environment:MLPipelineDebugEnv
+
+tasks:
+  - id: task_1
+    name: "Single Bug — Preprocessing"
+    difficulty: easy
+    description: >
+      A binary classification pipeline where the test set is incorrectly
+      fitted with the scaler (data leakage). Agent must identify and fix
+      the preprocessing stage.
+    num_bugs: 1
+    stages: [preprocessing]
+    max_steps: 5
+
+  - id: task_2
+    name: "Two Bugs — Preprocessing + Model Config"
+    difficulty: medium
+    description: >
+      A multi-class CNN pipeline with two bugs: missing image normalization
+      and incorrect loss function (BCELoss instead of CrossEntropyLoss).
+      Agent must fix both in order.
+    num_bugs: 2
+    stages: [preprocessing, model_config]
+    max_steps: 10
+
+  - id: task_3
+    name: "Three Bugs — Full Pipeline"
+    difficulty: hard
+    description: >
+      A regression MLP with bugs across all three pipeline stages:
+      improper NaN handling, too-high learning rate, and missing
+      optimizer.zero_grad(). Agent must identify and fix all three.
+    num_bugs: 3
+    stages: [preprocessing, model_config, training_loop]
+    max_steps: 15
+
+observation_schema:
+  task_id: string
+  step: integer
+  current_stage: enum[preprocessing, model_config, training_loop]
+  bug_symptom:
+    stage: enum[preprocessing, model_config, training_loop]
+    symptom: string
+    code_snippet: string
+  pipeline_context: string
+  stages_fixed: list[string]
+  stages_remaining: list[string]
+  total_stages: integer
+  message: string | null
+
+action_schema:
+  stage: enum[preprocessing, model_config, training_loop]
+  fix: string
+  reason: string
+  confidence: float  # 0.0 to 1.0
+
+reward_range: [-0.3, 0.6]
+scoring: grader  # deterministic, score in [0.0, 1.0]
