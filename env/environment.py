@@ -47,6 +47,10 @@ class MLPipelineDebugEnv(Environment):
 
     # 3. UPDATED SIGNATURE (Returns ONLY Observation)
     def step(self, action: Action, timeout_s=None, **kwargs) -> Observation:
+        if not self._bugs:
+            # Re-initialize the task if memory was wiped
+            self.reset(task_id=self._task_id or "task_1")
+        
         if self._done:
             raise RuntimeError("Episode is done. Call reset() to start a new episode.")
 

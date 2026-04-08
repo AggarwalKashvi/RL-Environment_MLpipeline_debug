@@ -114,7 +114,7 @@ def main():
             continue
 
         try:
-            result = call_env("step", action)
+            result = call_env("step", {"action": action})
             obs = result.get("observation", {})
             
             # FIXED: OpenEnv returns the reward directly as a float
@@ -140,8 +140,8 @@ def main():
 
     if not final_score:
         try:
-            state = call_env("state", method="GET")
-            final_score = 0.0 
+            score_data = call_env("score", method="GET")
+            final_score = score_data.get("score", 0.0) 
         except Exception:
             pass
 
