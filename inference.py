@@ -13,25 +13,29 @@ Optional env vars:
 """
 
 import os
-import sys
 import json
 import requests
 from openai import OpenAI
+
+from models import action
 
 # ------------------------------------------------------------------
 # Config from environment
 # ------------------------------------------------------------------
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o")
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
-TASK_ID = os.environ.get("TASK_ID", "task_1")
+MODEL_NAME   = os.environ.get("MODEL_NAME", "gpt-4o")
+HF_TOKEN     = os.environ.get("HF_TOKEN", "")
+TASK_ID      = os.environ.get("TASK_ID", "task_1")
 ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:8000")
+MAX_STEPS    = 20
+ENV_NAME     = "MLPipelineDebugEnv"
 
-MAX_STEPS = 20
+# Use HF token if provided, else fallback
+API_KEY = HF_TOKEN if HF_TOKEN else os.environ.get("OPENAI_API_KEY", "")
 
-client = OpenAI(
+llm = OpenAI(
     base_url=API_BASE_URL,
-    api_key=HF_TOKEN or "sk-placeholder",
+    api_key=API_KEY,
 )
 
 SYSTEM_PROMPT = """You are an expert ML engineer debugging a broken ML pipeline.
@@ -61,12 +65,11 @@ def call_env(endpoint: str, payload: dict = None, method: str = "POST") -> dict:
 
 
 def obs_to_prompt(obs: dict) -> str:
-    bug = obs.get("bug_symptom", {})
     return (
         f"Pipeline context: {obs.get('pipeline_context', '')}\n\n"
         f"Current stage: {obs.get('current_stage', '')}\n"
-        f"Symptom: {bug.get('symptom', '')}\n\n"
-        f"Buggy code:\n```python\n{bug.get('code_snippet', '')}\n```\n\n"
+        f"Symptom: {obs.get('symptom', '')}\n\n"
+        f"Buggy code:\n```python\n{obs.get('code_snippet', '')}\n```\n\n"
         f"Stages already fixed: {obs.get('stages_fixed', [])}\n"
         f"Stages remaining: {obs.get('stages_remaining', [])}\n\n"
         f"What is the fix? Respond with JSON only."
@@ -75,64 +78,120 @@ def obs_to_prompt(obs: dict) -> str:
 
 def parse_action(response_text: str) -> dict:
     text = response_text.strip()
-    # Strip markdown code fences if present
+
+    # Remove markdown if present
     if text.startswith("```"):
         lines = text.split("\n")
         text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
-    return json.loads(text)
+
+    # Try parsing JSON safely
+    try:
+        return json.loads(text)
+    except Exception:
+        # Fallback: return a default safe action
+        return {
+            "stage": "preprocessing",
+            "fix": "Model output was invalid JSON. Retry with proper JSON format.",
+            "reason": "Local model failed to produce valid JSON.",
+            "confidence": 0.0
+        }
+
+
+def fetch_final_score() -> float:
+    """Call /score endpoint if available, else fall back to /state."""
+
+    # Try dedicated /score endpoint first
+    try:
+        result = call_env("score", method="GET")
+        return float(result.get("score", 0.0))
+    except Exception:
+        pass
+
+    # Fall back: read final_score from /state
+    try:
+        state = call_env("state", method="GET")
+        return float(state.get("final_score", 0.0))
+    except Exception:
+        return 0.0
+    
+def sanitize_action(action: dict) -> dict | None:
+    try:
+        stage = action.get("stage", "").strip().lower()
+        fix = action.get("fix", "").strip()
+        reason = action.get("reason", "").strip()
+        confidence = float(action.get("confidence", 0.0))
+
+        # Enforce valid stage
+        if stage not in ["preprocessing", "model_config", "training_loop"]:
+            return None
+
+        # Ensure non-empty strings
+        if not fix or not reason:
+            return None
+
+        # Clamp confidence
+        confidence = max(0.0, min(1.0, confidence))
+
+        return {
+            "stage": stage,
+            "fix": fix,
+            "reason": reason,
+            "confidence": confidence,
+        }
+
+    except Exception:
+        return None
 
 
 def main():
-    env_name = MLPipelineDebugEnv_NAME = "MLPipelineDebugEnv"
+    print(f"[START] task={TASK_ID} env={ENV_NAME} model={MODEL_NAME}")
 
-    # [START]
-    print(f"[START] task={TASK_ID} env={env_name} model={MODEL_NAME}")
-
-    # Reset environment
     obs = call_env("reset", {"task_id": TASK_ID})
 
-    step_num = 0
-    reward_log = []
-    done = False
+    step_num    = 0
+    reward_log  = []
+    done        = False
     final_score = 0.0
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages    = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     while not done and step_num < MAX_STEPS:
-        user_msg = obs_to_prompt(obs)
-        messages.append({"role": "user", "content": user_msg})
+        messages.append({"role": "user", "content": obs_to_prompt(obs)})
 
-        # Call LLM
+        # ── Call LLM ──────────────────────────────────────────────
         try:
-            completion = client.chat.completions.create(
+            completion = llm.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=0.2,
                 max_tokens=512,
+                extra_headers={
+                    "X-Use-Cache": "false"
+                }
             )
             raw = completion.choices[0].message.content
             messages.append({"role": "assistant", "content": raw})
             action = parse_action(raw)
+            action = sanitize_action(action)
         except Exception as e:
-            print(
-                f"[STEP] step={step_num} action=null reward=-0.30 done=false error={str(e)}"
-            )
+            print(f"[STEP] step={step_num} action=null reward=-0.30 done=false error={e}")
             reward_log.append(-0.30)
             step_num += 1
             continue
 
-        # Step environment
+        # ── Step environment ───────────────────────────────────────
         try:
-            result = call_env("step", action)
-            obs = result["observation"]
+            result     = call_env("step", action)
+            obs        = result["observation"]
             reward_val = result["reward"]["value"]
-            done = result["done"]
-            info = result.get("info", {})
-            final_score = info.get("score") or 0.0
+            done       = result["done"]
+
+            # Score is returned by the env on every step (not just final)
+            score_from_step = result.get("info", {}).get("score")
+            if score_from_step is not None:
+                final_score = float(score_from_step)
 
             reward_log.append(reward_val)
 
-            # [STEP]
             print(
                 f"[STEP] step={step_num} "
                 f"action={json.dumps(action.get('fix', ''))[:60]} "
@@ -141,25 +200,18 @@ def main():
                 f"error=null"
             )
         except Exception as e:
-            print(
-                f"[STEP] step={step_num} action=null reward=-0.30 done=false error={str(e)}"
-            )
+            print(f"[STEP] step={step_num} action=null reward=-0.30 done=false error={e}")
             reward_log.append(-0.30)
 
         step_num += 1
 
-    # Get final score if not already set
-    if not final_score:
-        try:
-            state = call_env("state", method="GET")
-            final_score = 0.0  # will be computed by grader on submission
-        except Exception:
-            pass
+    # ── Fetch real grader score if episode finished ────────────────
+    if done and final_score == 0.0:
+        final_score = fetch_final_score()
 
     rewards_str = ",".join(f"{r:.2f}" for r in reward_log)
     success = done and final_score >= 0.8
 
-    # [END]
     print(
         f"[END] success={'true' if success else 'false'} "
         f"steps={step_num} "

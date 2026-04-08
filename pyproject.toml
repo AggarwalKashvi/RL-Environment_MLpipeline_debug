@@ -3,7 +3,8 @@ name = "mlpipeline-debug-env"
 version = "0.1.0"
 description = "OpenEnv ML pipeline debugging environment"
 authors = [
-    { name = "Kashvi Aggarwal" }
+    { name = "Kashvi Aggarwal" },
+    { name = "Riya Gupta"}
 ]
 dependencies = [
     "fastapi==0.111.0",

@@ -4,8 +4,7 @@ from typing import Optional, Dict, Any
 
 from env.environment import MLPipelineDebugEnv
 from models.action import Action
-from models.observation import Observation
-from models.reward import Reward
+from models.observation import PipelineStage
 
 app = FastAPI(
     title="MLPipelineDebugEnv",
@@ -13,13 +12,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Single global environment instance (stateful)
 env = MLPipelineDebugEnv()
 
 
-# ------------------------------------------------------------------
-# Request/Response schemas
-# ------------------------------------------------------------------
+# ── Request schemas ────────────────────────────────────────────────────────
 
 class ResetRequest(BaseModel):
     task_id: Optional[str] = "task_1"
@@ -32,34 +28,20 @@ class StepRequest(BaseModel):
     confidence: Optional[float] = 1.0
 
 
-class StepResponse(BaseModel):
-    observation: Dict[str, Any]
-    reward: Dict[str, Any]
-    done: bool
-    info: Dict[str, Any]
-
-
-# ------------------------------------------------------------------
-# Routes
-# ------------------------------------------------------------------
+# ── Routes ─────────────────────────────────────────────────────────────────
 
 @app.post("/reset")
 def reset(request: ResetRequest):
     try:
         obs = env.reset(task_id=request.task_id)
-        return {
-            "observation": obs.dict(),
-            "done": False,
-            "info": {}
-        }
+        return obs.dict()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/step", response_model=StepResponse)
+@app.post("/step")
 def step(request: StepRequest):
     try:
-        from models.observation import PipelineStage
         action = Action(
             stage=PipelineStage(request.stage),
             fix=request.fix,
@@ -67,16 +49,20 @@ def step(request: StepRequest):
             confidence=request.confidence,
         )
         obs, reward, done, info = env.step(action)
-        return StepResponse(
-            observation=obs.dict(),
-            reward=reward.value,
-            done=done,
-            info={
+
+        # Always compute and return the grader score, not just when done
+        current_score = env.final_score()
+
+        return {
+            "observation": obs.dict(),
+            "reward": reward.dict(),
+            "done": done,
+            "info": {
                 "reward_reason": info["reward_reason"],
-                "score": info["score"],
+                "score": current_score,   # ← real grader score every step
                 "steps": env._step_count,
             },
-        )
+        }
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -85,7 +71,20 @@ def step(request: StepRequest):
 
 @app.get("/state")
 def state():
-    return env.state()
+    s = env.state()
+    s["final_score"] = env.final_score()   # ← include grader score in state too
+    return s
+
+
+@app.get("/score")
+def score():
+    """Dedicated endpoint for fetching the current grader score."""
+    return {
+        "score": env.final_score(),
+        "steps": env._step_count,
+        "done": env._done,
+        "cumulative_reward": env._cumulative_reward,
+    }
 
 
 @app.get("/health")
