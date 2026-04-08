@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, validator
 from typing import Optional
 from models.observation import PipelineStage
+from openenv.core.env_server import Action as OpenEnvAction
 
 
 class Action(BaseModel):

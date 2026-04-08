@@ -1,4 +1,6 @@
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List
+from openenv.core.env_server import Environment   # <-- ADDED IMPORT
+
 from models.observation import Observation, BugSymptom, PipelineStage
 from models.action import Action
 from models.reward import Reward
@@ -6,8 +8,8 @@ from env.tasks import TASKS
 from env.rewards import compute_reward
 from env.graders import grade_task
 
-
-class MLPipelineDebugEnv:
+# 1. ADDED INHERITANCE
+class MLPipelineDebugEnv(Environment):
     ENV_NAME = "MLPipelineDebugEnv"
 
     def __init__(self):
@@ -21,10 +23,8 @@ class MLPipelineDebugEnv:
         self._history: List[Dict[str, Any]] = []
         self._reward_log: List[float] = []
 
-    # ------------------------------------------------------------------
-    # reset()
-    # ------------------------------------------------------------------
-    def reset(self, task_id: str = "task_1") -> Observation:
+    # 2. UPDATED SIGNATURE (OpenEnv passes seed and episode_id automatically)
+    def reset(self, seed=None, episode_id=None, task_id: str = "task_1", **kwargs) -> Observation:
         if task_id not in TASKS:
             raise ValueError(f"Unknown task_id '{task_id}'. Choose from: {list(TASKS.keys())}")
 
@@ -39,12 +39,14 @@ class MLPipelineDebugEnv:
         self._history = []
         self._reward_log = []
 
-        return self._make_observation()
+        obs = self._make_observation()
+        # Ensure base OpenEnv fields are populated on reset
+        obs.done = False
+        obs.reward = 0.0 
+        return obs
 
-    # ------------------------------------------------------------------
-    # step()
-    # ------------------------------------------------------------------
-    def step(self, action: Action) -> Tuple[Observation, Reward, bool, Dict[str, Any]]:
+    # 3. UPDATED SIGNATURE (Returns ONLY Observation)
+    def step(self, action: Action, timeout_s=None, **kwargs) -> Observation:
         if self._done:
             raise RuntimeError("Episode is done. Call reset() to start a new episode.")
 
@@ -70,7 +72,6 @@ class MLPipelineDebugEnv:
         self._step_count += 1
         self._reward_log.append(reward.value)
 
-        # Record history
         self._history.append({
             "stage": action.stage,
             "fix": action.fix,
@@ -79,28 +80,25 @@ class MLPipelineDebugEnv:
             "reward_reason": reward.reason,
         })
 
-        # Advance if correct fix
         from models.reward import RewardReason
         if reward.reason in (RewardReason.CORRECT_FIX, RewardReason.TASK_COMPLETE):
             self._stages_fixed.append(action.stage)
             self._current_bug_index += 1
 
-        # Check if done
         if self._current_bug_index >= len(self._bugs):
             self._done = True
 
+        # Generate the observation
         obs = self._make_observation(message=reward.detail)
-        info = {
-            "reward_reason": reward.reason,
-            "history": self._history,
-            "score": self.final_score() if self._done else None,
-        }
+        
+        # 4. ATTACH REWARD AND DONE DIRECTLY TO OBSERVATION
+        obs.reward = reward.value
+        obs.done = self._done
+        
+        return obs
 
-        return obs, reward, self._done, info
-
-    # ------------------------------------------------------------------
-    # state()
-    # ------------------------------------------------------------------
+    # 5. ADDED @property DECORATOR (Required by OpenEnv spec)
+    @property
     def state(self) -> Dict[str, Any]:
         return {
             "task_id": self._task_id,
