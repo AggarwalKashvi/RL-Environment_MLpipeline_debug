@@ -17,8 +17,6 @@ import json
 import requests
 from openai import OpenAI
 
-from models import action
-
 # ------------------------------------------------------------------
 # Config from environment
 # ------------------------------------------------------------------
@@ -30,12 +28,9 @@ ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:8000")
 MAX_STEPS    = 20
 ENV_NAME     = "MLPipelineDebugEnv"
 
-# Use HF token if provided, else fallback
-API_KEY = HF_TOKEN if HF_TOKEN else os.environ.get("OPENAI_API_KEY", "")
-
 llm = OpenAI(
     base_url=API_BASE_URL,
-    api_key=API_KEY,
+    api_key=HF_TOKEN or "sk-placeholder",
 )
 
 SYSTEM_PROMPT = """You are an expert ML engineer debugging a broken ML pipeline.
@@ -51,7 +46,10 @@ You must respond ONLY with a valid JSON object with these exact keys:
   "confidence": <float 0.0 to 1.0>
 }
 
-No extra text. No markdown. Only the JSON object."""
+CRITICAL RULES:
+- The "stage" value MUST exactly match the current stage shown to you.
+- Fix ONE stage at a time in the order given. Do NOT skip ahead.
+- No extra text. No markdown. Only the raw JSON object."""
 
 
 def call_env(endpoint: str, payload: dict = None, method: str = "POST") -> dict:
@@ -65,41 +63,28 @@ def call_env(endpoint: str, payload: dict = None, method: str = "POST") -> dict:
 
 
 def obs_to_prompt(obs: dict) -> str:
+    current_stage = obs.get("current_stage", "")
     return (
         f"Pipeline context: {obs.get('pipeline_context', '')}\n\n"
-        f"Current stage: {obs.get('current_stage', '')}\n"
+        f">>> CURRENT STAGE TO FIX: {current_stage} <<<\n"
+        f"You MUST set stage to exactly: \"{current_stage}\"\n\n"
         f"Symptom: {obs.get('symptom', '')}\n\n"
         f"Buggy code:\n```python\n{obs.get('code_snippet', '')}\n```\n\n"
         f"Stages already fixed: {obs.get('stages_fixed', [])}\n"
         f"Stages remaining: {obs.get('stages_remaining', [])}\n\n"
-        f"What is the fix? Respond with JSON only."
+        f"Respond with JSON only. stage must be \"{current_stage}\"."
     )
-
 
 def parse_action(response_text: str) -> dict:
     text = response_text.strip()
-
-    # Remove markdown if present
     if text.startswith("```"):
         lines = text.split("\n")
         text = "\n".join(lines[1:-1]) if len(lines) > 2 else text
-
-    # Try parsing JSON safely
-    try:
-        return json.loads(text)
-    except Exception:
-        # Fallback: return a default safe action
-        return {
-            "stage": "preprocessing",
-            "fix": "Model output was invalid JSON. Retry with proper JSON format.",
-            "reason": "Local model failed to produce valid JSON.",
-            "confidence": 0.0
-        }
+    return json.loads(text)
 
 
 def fetch_final_score() -> float:
     """Call /score endpoint if available, else fall back to /state."""
-
     # Try dedicated /score endpoint first
     try:
         result = call_env("score", method="GET")
@@ -107,40 +92,13 @@ def fetch_final_score() -> float:
     except Exception:
         pass
 
-    # Fall back: read final_score from /state
+    # Fall back: read cumulative_reward from /state as a proxy
     try:
         state = call_env("state", method="GET")
+        # Return grader score if present, else 0
         return float(state.get("final_score", 0.0))
     except Exception:
         return 0.0
-    
-def sanitize_action(action: dict) -> dict | None:
-    try:
-        stage = action.get("stage", "").strip().lower()
-        fix = action.get("fix", "").strip()
-        reason = action.get("reason", "").strip()
-        confidence = float(action.get("confidence", 0.0))
-
-        # Enforce valid stage
-        if stage not in ["preprocessing", "model_config", "training_loop"]:
-            return None
-
-        # Ensure non-empty strings
-        if not fix or not reason:
-            return None
-
-        # Clamp confidence
-        confidence = max(0.0, min(1.0, confidence))
-
-        return {
-            "stage": stage,
-            "fix": fix,
-            "reason": reason,
-            "confidence": confidence,
-        }
-
-    except Exception:
-        return None
 
 
 def main():
@@ -164,14 +122,10 @@ def main():
                 messages=messages,
                 temperature=0.2,
                 max_tokens=512,
-                extra_headers={
-                    "X-Use-Cache": "false"
-                }
             )
             raw = completion.choices[0].message.content
             messages.append({"role": "assistant", "content": raw})
             action = parse_action(raw)
-            action = sanitize_action(action)
         except Exception as e:
             print(f"[STEP] step={step_num} action=null reward=-0.30 done=false error={e}")
             reward_log.append(-0.30)
@@ -191,6 +145,10 @@ def main():
                 final_score = float(score_from_step)
 
             reward_log.append(reward_val)
+
+            # Reset message history on correct fix so model doesn't get stuck
+            if reward_val > 0.3:
+                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
             print(
                 f"[STEP] step={step_num} "
