@@ -11,20 +11,11 @@ from openai import OpenAI
 # ------------------------------------------------------------------
 # Config from environment
 # ------------------------------------------------------------------
-# 1. Use the free Hugging Face router instead of paid OpenAI
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-
-# 2. Use a highly capable open-source model available on the router
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-
-# 3. YOUR HUGGING FACE TOKEN GOES HERE 
 HF_TOKEN = os.environ.get("HF_TOKEN", "") 
-
 TASK_ID = os.environ.get("TASK_ID", "task_1")
-
-# 4. Point it to your live Hugging Face Space!
 ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "https://atpugayir-ml-pipeline-debugger.hf.space")
-
 MAX_STEPS = 20
 
 client = OpenAI(
@@ -81,7 +72,6 @@ def parse_action(response_text: str) -> dict:
 
 def main():
     env_name = "MLPipelineDebugEnv"
-
     print(f"[START] task={TASK_ID} env={env_name} model={MODEL_NAME}")
 
     obs = call_env("reset", {"task_id": TASK_ID})
@@ -114,15 +104,15 @@ def main():
             continue
 
         try:
+            # The REQUIRED OpenEnv wrapper
             result = call_env("step", {"action": action})
             obs = result.get("observation", {})
             
-            # FIXED: OpenEnv returns the reward directly as a float
             reward_val = result.get("reward", 0.0) 
             done = result.get("done", False)
             info = result.get("info", {})
+            
             final_score = info.get("score") or 0.0
-
             reward_log.append(reward_val)
 
             print(
@@ -138,12 +128,23 @@ def main():
 
         step_num += 1
 
+    # THE ULTIMATE DIAGNOSTIC EXTRACTION
     if not final_score:
         try:
-            score_data = call_env("score", method="GET")
-            final_score = score_data.get("score", 0.0) 
-        except Exception:
-            pass
+            raw_response = call_env("state", method="GET")
+            
+            print("\n" + "="*50)
+            print("RAW SERVER STATE JSON:")
+            print(json.dumps(raw_response, indent=2))
+            print("="*50 + "\n")
+            
+            if "state" in raw_response:
+                final_score = raw_response["state"].get("final_score", 0.0)
+            else:
+                final_score = raw_response.get("final_score", 0.0)
+                
+        except Exception as e:
+            print(f"Warning: Failed to fetch state - {e}")
 
     rewards_str = ",".join(f"{r:.2f}" for r in reward_log)
     success = done and final_score >= 0.8
@@ -154,7 +155,6 @@ def main():
         f"score={final_score:.4f} "
         f"rewards={rewards_str}"
     )
-
 
 if __name__ == "__main__":
     main()

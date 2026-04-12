@@ -115,6 +115,7 @@ class MLPipelineDebugEnv(Environment):
             "cumulative_reward": self._cumulative_reward,
             "done": self._done,
             "reward_log": self._reward_log,
+            "final_score": self.final_score(),
         }
 
     # ------------------------------------------------------------------
